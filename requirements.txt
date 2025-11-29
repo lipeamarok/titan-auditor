@@ -1,0 +1,10 @@
+streamlit
+openai
+pypdf
+python-dotenv
+pydantic
+yfinance
+cryptography
+requests
+pdfplumber
+beautifulsoup4
