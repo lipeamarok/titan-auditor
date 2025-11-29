@@ -132,39 +132,70 @@ class TitanMathEngine:
             else:
                 flags.append(f"🚨 Basileia Crítico: {data.basel_ratio*100:.1f}%. Abaixo do mínimo regulatório!")
         else:
-            # Proxy: PL / Ativos
+            # Proxy: PL / Ativos (NÃO é Basileia! Basileia usa RWA)
+            # Para bancos grandes, PL/Ativos de 5-10% é NORMAL
+            # Alavancagem de 10-20x é típica de bancos (operam com dinheiro dos depositantes)
             capital_ratio = self.safe_div(data.equity, data.total_assets)
-            if capital_ratio >= 0.10:
-                score += 0.8
+            if capital_ratio >= 0.08:
+                score += 1.0  # Excelente para banco
+                flags.append(f"ℹ️ Capital/Ativos de {capital_ratio*100:.1f}% indica estrutura sólida.")
             elif capital_ratio >= 0.05:
+                score += 0.7  # Normal para grandes bancos
+                # Não gera alerta - é normal para bancos!
+            elif capital_ratio >= 0.03:
                 score += 0.4
-                flags.append(f"⚠️ Alavancagem Alta: PL representa apenas {capital_ratio*100:.1f}% dos ativos.")
+                flags.append(f"⚠️ Alavancagem Elevada: PL representa {capital_ratio*100:.1f}% dos ativos.")
             else:
                 flags.append(f"🚨 Alavancagem Crítica: PL representa apenas {capital_ratio*100:.1f}% dos ativos.")
 
-        # 2. Inadimplência (NPL)
+        # 2. Cobertura de PDD (Provisão para Devedores Duvidosos)
+        # IMPORTANTE: non_performing_loans aqui é PDD/Carteira (cobertura), NÃO inadimplência real
+        # PDD/Carteira de 4-6% é NORMAL para bancos brasileiros - indica provisão conservadora
+        # Inadimplência real (NPL) seria empréstimos >90 dias em atraso, dado que não temos
         if data.non_performing_loans is not None:
-            if data.non_performing_loans <= 0.03:  # <= 3% é bom
-                score += 1.0
-            elif data.non_performing_loans <= 0.05:  # <= 5% é aceitável
-                score += 0.5
-                flags.append(f"⚠️ Inadimplência Elevada: NPL de {data.non_performing_loans*100:.1f}%.")
-            else:
-                flags.append(f"🚨 Carteira Podre: NPL de {data.non_performing_loans*100:.1f}%. Risco de crédito elevado.")
+            coverage = data.non_performing_loans
+            if coverage <= 0.03:  # <= 3% - provisão baixa (pode ser risco)
+                score += 0.6
+                # Não é necessariamente bom - pode indicar sub-provisionamento
+            elif coverage <= 0.06:  # 3-6% - provisão adequada
+                score += 1.0  # Melhor score - cobertura saudável
+            elif coverage <= 0.10:  # 6-10% - provisão elevada (carteira estressada?)
+                score += 0.7
+                flags.append(f"⚠️ Cobertura de PDD elevada: {coverage*100:.1f}% da carteira provisionada.")
+            else:  # > 10% - carteira muito estressada
+                score += 0.3
+                flags.append(f"🚨 Cobertura de PDD crítica: {coverage*100:.1f}%. Carteira de crédito sob estresse.")
         else:
             score += 0.5  # Sem dados, neutro
 
         # 3. ROE Bancário (> 15% é bom para bancos)
+        # NOTA: Se dados são YTD (ex: 9 meses), o ROE precisa ser anualizado
         roe = self.safe_div(data.net_income, data.equity)
-        if roe >= 0.15:
+        
+        # Detectar se é YTD pelo período (ex: "2025-09-30" = 9 meses)
+        annualization_factor = 1.0
+        if data.period and len(data.period) >= 10:
+            try:
+                month = int(data.period[5:7])
+                if month < 12:
+                    annualization_factor = 12 / month
+            except (ValueError, IndexError):
+                pass
+        
+        roe_annualized = roe * annualization_factor
+        
+        if roe_annualized >= 0.15:
             score += 1.0
-        elif roe >= 0.10:
-            score += 0.5
-        elif roe < 0.05 and roe >= 0:
-            flags.append(f"⚠️ ROE Fraco: {roe*100:.1f}%. Rentabilidade abaixo do esperado para bancos.")
+        elif roe_annualized >= 0.10:
+            score += 0.7
+        elif roe_annualized >= 0.05:
+            score += 0.4
+            # ROE de 5-10% anualizado é mediano, mas não crítico
+        elif roe_annualized < 0.05 and roe_annualized >= 0:
+            flags.append(f"⚠️ ROE Fraco: {roe_annualized*100:.1f}% (anualizado). Rentabilidade abaixo do esperado para bancos.")
 
         # Status baseado no score
-        if score >= 2.5:
+        if score >= 2.2:
             status = "Banco Saudável"
         elif score >= 1.5:
             status = "Banco em Alerta"

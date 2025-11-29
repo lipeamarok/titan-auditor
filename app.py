@@ -141,14 +141,20 @@ def get_api_credentials(provider_key: str):
     if not config: return None, None, None
 
     env_var = config["api_key_env"]
-    
+
     # Tenta st.secrets primeiro (Streamlit Cloud), depois os.getenv (.env local)
     key = None
-    if hasattr(st, 'secrets') and env_var in st.secrets:
-        key = st.secrets[env_var]
-    else:
+    try:
+        # Streamlit Cloud - secrets.toml existe
+        if hasattr(st, 'secrets') and len(st.secrets) > 0 and env_var in st.secrets:
+            key = st.secrets[env_var]
+    except Exception:
+        pass  # Ignora se secrets não existir
+
+    if not key:
+        # Fallback para .env local
         key = os.getenv(env_var)
-    
+
     if not key:
         st.error(f"Chave {env_var} não encontrada. Configure no .env (local) ou em Secrets (Streamlit Cloud).")
         st.stop()
@@ -167,6 +173,21 @@ def format_currency(value, currency_code="BRL"):
     if value > 1e9: return f"{sym} {value/1e9:.2f} Bi"
     if value > 1e6: return f"{sym} {value/1e6:.2f} Mi"
     return f"{sym} {value:.2f}"
+
+def annualize_roe(roe_value: float, period: str) -> float:
+    """
+    Anualiza o ROE se os dados forem YTD (Year-to-Date).
+    Ex: Se período é "2025-09-30" (9 meses), multiplica por 12/9.
+    """
+    if not period or len(period) < 10:
+        return roe_value
+    try:
+        month = int(period[5:7])
+        if 0 < month < 12:
+            return roe_value * (12 / month)
+    except (ValueError, IndexError):
+        pass
+    return roe_value
 
 # --- UI COMPONENTS (DASHBOARD PROFISSIONAL) ---
 
@@ -276,41 +297,128 @@ def render_titan_dashboard(financials, math_report, audit_report):
         # === DASHBOARD BANKING ===
         if sector == "Banking":
             m1, m2, m3, m4 = st.columns(4)
+            
+            # Card 1: Solidez (Capital/Ativos ou Basileia)
             with m1:
                 basel = getattr(financials, 'basel_ratio', None)
                 if basel is None:
                     basel = math_report.dupont_analysis.get('capital_ratio', 0)
+                
+                # Para bancos: 8%+ é bom, 5-8% é ok, <5% é ruim
+                if basel and basel >= 0.08:
+                    delta_text = "Sólido"
+                    delta_type = "positive"
+                elif basel and basel >= 0.05:
+                    delta_text = "Adequado"
+                    delta_type = "neutral"
+                else:
+                    delta_text = "Frágil"
+                    delta_type = "negative"
+                
                 metric_card(
                     label=FRIENDLY_LABELS['basel'],
                     value=f"{basel*100:.1f}%" if basel else "N/A",
-                    delta="Saudavel" if basel and basel >= 0.11 else "Alerta",
-                    delta_type="positive" if basel and basel >= 0.11 else "negative",
+                    delta=delta_text if basel else None,
+                    delta_type=delta_type if basel else "neutral",
                     icon_name="bank",
-                    tooltip=METRIC_TOOLTIPS["basel"]
+                    tooltip="Capital próprio / Ativos totais. Bancos operam com 5-10% tipicamente. >8% é sólido."
                 )
+            
+            # Card 2: Cobertura de Crédito (PDD/Carteira)
+            # NOTA: Isso é COBERTURA de provisão, não inadimplência real
+            # 4-6% é normal para bancos brasileiros
             with m2:
                 npl = getattr(financials, 'non_performing_loans', None)
+                pdd = getattr(financials, 'pdd_balance', None) or 0
+                carteira = getattr(financials, 'loan_portfolio', None) or 0
+                
+                if npl is not None and npl > 0:
+                    # PDD/Carteira - indica cobertura de provisão
+                    if npl <= 0.03:
+                        delta_text = "Baixa"  # Pode ser sub-provisionamento
+                        delta_type = "neutral"
+                    elif npl <= 0.06:
+                        delta_text = "Saudável"  # Provisão adequada
+                        delta_type = "positive"
+                    elif npl <= 0.10:
+                        delta_text = "Elevada"  # Carteira estressada
+                        delta_type = "neutral"
+                    else:
+                        delta_text = "Crítica"
+                        delta_type = "negative"
+                    value_text = f"{npl*100:.1f}%"
+                    if pdd > 0 and carteira > 0:
+                        tooltip_text = f"Cobertura de PDD: R$ {pdd/1e9:.1f}bi provisionados sobre carteira de R$ {carteira/1e9:.0f}bi. Entre 4-6% é considerado saudável para bancos brasileiros."
+                    else:
+                        tooltip_text = f"Índice de cobertura de {npl*100:.1f}%. 4-6% é saudável, <3% pode indicar sub-provisionamento, >8% indica carteira estressada."
+                else:
+                    delta_text = "Sem dados"
+                    delta_type = "neutral"
+                    value_text = "N/A"
+                    tooltip_text = "Dados de PDD/Carteira de Crédito não disponíveis neste relatório."
+                
                 metric_card(
-                    label=FRIENDLY_LABELS['npl'],
-                    value=f"{npl*100:.1f}%" if npl else "N/A",
-                    delta="Controlado" if npl and npl <= 0.05 else "Elevado",
-                    delta_type="positive" if npl and npl <= 0.05 else "negative",
-                    icon_name="alert_triangle",
-                    tooltip=METRIC_TOOLTIPS["npl"]
+                    label="PDD/Carteira",
+                    value=value_text,
+                    delta=delta_text,
+                    delta_type=delta_type,
+                    icon_name="shield",  # Ícone de proteção, não alerta
+                    tooltip=tooltip_text
                 )
+            
+            # Card 3: Rentabilidade (ROE anualizado)
             with m3:
+                roe_raw = math_report.dupont_analysis['roe']
+                roe_display = annualize_roe(roe_raw, financials.period)
+                
+                # Para bancos: >15% é ótimo, 10-15% é bom, <10% é fraco
+                if roe_display >= 15:
+                    delta_text = "Excelente"
+                    delta_type = "positive"
+                elif roe_display >= 10:
+                    delta_text = "Bom"
+                    delta_type = "positive"
+                elif roe_display >= 5:
+                    delta_text = "Mediano"
+                    delta_type = "neutral"
+                else:
+                    delta_text = "Fraco"
+                    delta_type = "negative"
+                
+                # Indica se foi anualizado
+                is_annualized = roe_display != roe_raw
+                
                 metric_card(
                     label=FRIENDLY_LABELS['roe'],
-                    value=f"{math_report.dupont_analysis['roe']}%",
+                    value=f"{roe_display:.1f}%",
+                    delta=f"{delta_text}" + (" (anual.)" if is_annualized else ""),
+                    delta_type=delta_type,
                     icon_name="trending_up",
-                    tooltip=METRIC_TOOLTIPS["roe"]
+                    tooltip=f"Retorno sobre Patrimônio Líquido. Mede lucro gerado sobre capital dos acionistas. Bancos bons: >15%."
                 )
+            
+            # Card 4: Alavancagem
             with m4:
+                leverage = math_report.dupont_analysis['financial_leverage']
+                
+                # Para bancos: 8-15x é normal, >15x é alto, <8x é conservador
+                if leverage <= 10:
+                    delta_text = "Conservador"
+                    delta_type = "positive"
+                elif leverage <= 15:
+                    delta_text = "Normal"
+                    delta_type = "neutral"
+                else:
+                    delta_text = "Elevada"
+                    delta_type = "negative"
+                
                 metric_card(
                     label=FRIENDLY_LABELS['leverage'],
-                    value=f"{math_report.dupont_analysis['financial_leverage']:.1f}x",
+                    value=f"{leverage:.1f}x",
+                    delta=delta_text,
+                    delta_type=delta_type,
                     icon_name="scale",
-                    tooltip=METRIC_TOOLTIPS["leverage"]
+                    tooltip=f"Ativos / Patrimônio Líquido. Indica quanto o banco opera com capital de terceiros. 10-15x é típico para bancos."
                 )
 
         # === DASHBOARD INSURANCE ===
@@ -337,11 +445,14 @@ def render_titan_dashboard(financials, math_report, audit_report):
                     tooltip=METRIC_TOOLTIPS["combined"]
                 )
             with m3:
+                # ROE anualizado para seguradoras (dados YTD)
+                roe_raw = math_report.dupont_analysis['roe']
+                roe_display = annualize_roe(roe_raw, financials.period)
                 metric_card(
                     label=FRIENDLY_LABELS['roe'],
-                    value=f"{math_report.dupont_analysis['roe']}%",
+                    value=f"{roe_display:.2f}%",
                     icon_name="trending_up",
-                    tooltip=METRIC_TOOLTIPS["roe"]
+                    tooltip=METRIC_TOOLTIPS["roe"] + " (anualizado)" if roe_display != roe_raw else METRIC_TOOLTIPS["roe"]
                 )
             with m4:
                 metric_card(
@@ -365,11 +476,14 @@ def render_titan_dashboard(financials, math_report, audit_report):
                     tooltip=METRIC_TOOLTIPS["z_score"]
                 )
             with m2:
+                # ROE anualizado para corporates (dados YTD)
+                roe_raw = math_report.dupont_analysis['roe']
+                roe_display = annualize_roe(roe_raw, financials.period)
                 metric_card(
                     label=FRIENDLY_LABELS['roe'],
-                    value=f"{math_report.dupont_analysis['roe']}%",
+                    value=f"{roe_display:.2f}%",
                     icon_name="trending_up",
-                    tooltip=METRIC_TOOLTIPS["roe"]
+                    tooltip=METRIC_TOOLTIPS["roe"] + " (anualizado)" if roe_display != roe_raw else METRIC_TOOLTIPS["roe"]
                 )
             with m3:
                 metric_card(
@@ -618,7 +732,14 @@ def render_titan_dashboard(financials, math_report, audit_report):
                 st.write(f"- Margem Líquida: `{dupont.get('net_margin', 'N/A')}%`")
                 st.write(f"- Giro do Ativo: `{dupont.get('asset_turnover', 'N/A')}`")
                 st.write(f"- Alavancagem: `{dupont.get('financial_leverage', 'N/A')}x`")
-                st.write(f"- **ROE Resultante:** `{dupont.get('roe', 'N/A')}%`")
+                
+                # ROE com anualização se dados YTD
+                roe_raw = dupont.get('roe', 0)
+                roe_annualized = annualize_roe(roe_raw, financials.period)
+                if roe_annualized != roe_raw:
+                    st.write(f"- **ROE Resultante:** `{roe_raw}%` (YTD) → `{roe_annualized:.2f}%` (anualizado)")
+                else:
+                    st.write(f"- **ROE Resultante:** `{roe_raw}%`")
 
             # === NOTA DE VERIFICAÇÃO ===
             st.info(f"**Nota:** {audit_debug.get('verification_note', 'Compare os valores brutos com o documento original para validar a extração.')}")
@@ -1018,10 +1139,10 @@ def main():
 
                             # Mensagem diferente para BR vs US
                             if "CVM" in source:
-                                st.success(f"✅ Dados financeiros obtidos via CVM Dados Abertos ({form_type} - {filing_date})")
+                                st.success(f"Dados financeiros obtidos via CVM Dados Abertos ({form_type} - {filing_date})")
                                 button_label = "Auditar com Dados Oficiais CVM"
                             else:
-                                st.success(f"✅ Dados financeiros obtidos via SEC XBRL API ({form_type} - {filing_date})")
+                                st.success(f"Dados financeiros obtidos via SEC XBRL API ({form_type} - {filing_date})")
                                 button_label = "Auditar com Dados Oficiais SEC"
 
                             # Mostra preview dos dados extraídos
@@ -1223,6 +1344,9 @@ def run_audit_pipeline_from_xbrl(xbrl_data: dict, provider_key: str, metadata: d
     # Determina moeda baseada na fonte
     currency = "BRL" if "CVM" in source else "USD"
 
+    # Detecta setor do metadata (Banking ou Corporate)
+    detected_sector = metadata.get('sector', 'Corporate')
+
     with st.status(f"Analisando {ticker} ({form_type} - {filing_date})...", expanded=True) as status:
         try:
             # --- PASSO 1: CONSTRUIR FinancialStatement A PARTIR DO XBRL ---
@@ -1232,7 +1356,7 @@ def run_audit_pipeline_from_xbrl(xbrl_data: dict, provider_key: str, metadata: d
             financial_data = FinancialStatement(
                 company_name=ticker,
                 period=filing_date or form_type,
-                sector="Corporate",  # Empresas são Corporate
+                sector=detected_sector,  # Banking ou Corporate (vem do metadata)
                 currency=currency,
 
                 # Campos obrigatórios
@@ -1255,11 +1379,13 @@ def run_audit_pipeline_from_xbrl(xbrl_data: dict, provider_key: str, metadata: d
                 long_term_debt=xbrl_data.get("long_term_debt"),
                 short_term_debt=xbrl_data.get("short_term_debt"),
 
-                # Campos Banking (não aplicável para SEC stocks)
-                basel_ratio=None,
-                non_performing_loans=None,
-                deposits=None,
-                loan_portfolio=None,
+                # Campos Banking (para IFs)
+                basel_ratio=xbrl_data.get("basel_ratio"),
+                non_performing_loans=xbrl_data.get("non_performing_loans"),
+                deposits=xbrl_data.get("deposits"),
+                loan_portfolio=xbrl_data.get("loan_portfolio"),
+                pdd_balance=xbrl_data.get("pdd_balance"),
+                pdd_expense=xbrl_data.get("pdd_expense"),
 
                 # Campos Insurance (não aplicável para SEC stocks)
                 loss_ratio=None,
@@ -1300,21 +1426,21 @@ def run_audit_pipeline_from_xbrl(xbrl_data: dict, provider_key: str, metadata: d
             Dados financeiros oficiais da CVM (Dados Abertos) para {ticker}:
 
             BALANÇO PATRIMONIAL (posição em {filing_date}):
-            - Ativo Total: R$ {xbrl_data.get('total_assets', 0):,.0f}
-            - Ativo Circulante: R$ {xbrl_data.get('current_assets', 0):,.0f}
-            - Passivo Total: R$ {xbrl_data.get('total_liabilities', 0):,.0f}
-            - Passivo Circulante: R$ {xbrl_data.get('current_liabilities', 0):,.0f}
-            - Patrimônio Líquido: R$ {xbrl_data.get('equity', 0):,.0f}
-            - Lucros Acumulados: R$ {xbrl_data.get('retained_earnings', 0):,.0f}
+            - Ativo Total: R$ {xbrl_data.get('total_assets') or 0:,.0f}
+            - Ativo Circulante: R$ {xbrl_data.get('current_assets') or 0:,.0f}
+            - Passivo Total: R$ {xbrl_data.get('total_liabilities') or 0:,.0f}
+            - Passivo Circulante: R$ {xbrl_data.get('current_liabilities') or 0:,.0f}
+            - Patrimônio Líquido: R$ {xbrl_data.get('equity') or 0:,.0f}
+            - Lucros Acumulados: R$ {xbrl_data.get('retained_earnings') or 0:,.0f}
 
             DEMONSTRAÇÃO DE RESULTADOS{ytd_note}:
-            - Receita Líquida: R$ {xbrl_data.get('revenue', 0):,.0f}
-            - Lucro Líquido: R$ {xbrl_data.get('net_income', 0):,.0f}
-            - EBIT: R$ {xbrl_data.get('ebit', 0):,.0f}
+            - Receita Líquida: R$ {xbrl_data.get('revenue') or 0:,.0f}
+            - Lucro Líquido: R$ {xbrl_data.get('net_income') or 0:,.0f}
+            - EBIT: R$ {xbrl_data.get('ebit') or 0:,.0f}
 
             CAIXA E DÍVIDA:
-            - Caixa e Equivalentes: R$ {xbrl_data.get('cash', 0):,.0f}
-            - Dívida de Longo Prazo: R$ {xbrl_data.get('long_term_debt', 0):,.0f}
+            - Caixa e Equivalentes: R$ {xbrl_data.get('cash') or 0:,.0f}
+            - Dívida de Longo Prazo: R$ {xbrl_data.get('long_term_debt') or 0:,.0f}
 
             Período: {form_type} ({filing_date})
             Fonte: CVM Dados Abertos (Portal dados.cvm.gov.br)
@@ -1327,17 +1453,17 @@ def run_audit_pipeline_from_xbrl(xbrl_data: dict, provider_key: str, metadata: d
             Dados financeiros oficiais da SEC (XBRL) para {ticker}:
 
             BALANCE SHEET:
-            - Total Assets: ${xbrl_data.get('total_assets', 0):,.0f}
-            - Current Assets: ${xbrl_data.get('current_assets', 0):,.0f}
-            - Total Liabilities: ${xbrl_data.get('total_liabilities', 0):,.0f}
-            - Current Liabilities: ${xbrl_data.get('current_liabilities', 0):,.0f}
-            - Stockholders Equity: ${xbrl_data.get('equity', 0):,.0f}
-            - Retained Earnings: ${xbrl_data.get('retained_earnings', 0):,.0f}
+            - Total Assets: ${xbrl_data.get('total_assets') or 0:,.0f}
+            - Current Assets: ${xbrl_data.get('current_assets') or 0:,.0f}
+            - Total Liabilities: ${xbrl_data.get('total_liabilities') or 0:,.0f}
+            - Current Liabilities: ${xbrl_data.get('current_liabilities') or 0:,.0f}
+            - Stockholders Equity: ${xbrl_data.get('equity') or 0:,.0f}
+            - Retained Earnings: ${xbrl_data.get('retained_earnings') or 0:,.0f}
 
             INCOME STATEMENT:
-            - Revenue: ${xbrl_data.get('revenue', 0):,.0f}
-            - Net Income: ${xbrl_data.get('net_income', 0):,.0f}
-            - Operating Income (EBIT): ${xbrl_data.get('ebit', 0):,.0f}
+            - Revenue: ${xbrl_data.get('revenue') or 0:,.0f}
+            - Net Income: ${xbrl_data.get('net_income') or 0:,.0f}
+            - Operating Income (EBIT): ${xbrl_data.get('ebit') or 0:,.0f}
 
             CASH & DEBT:
             - Cash: ${xbrl_data.get('cash', 0):,.0f}

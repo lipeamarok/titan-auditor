@@ -162,6 +162,24 @@ class TitanRouter:
     # MÓDULO BRASIL (CVM) - Dados Estruturados
     # =========================================================================
 
+    # Tickers de Instituições Financeiras (Bancos) - usam plano de contas COSIF
+    # Estes tickers têm estrutura contábil diferente de empresas corporativas
+    BANKING_TICKERS = {
+        "ITUB4", "ITUB3",  # Itaú Unibanco
+        "BBDC4", "BBDC3",  # Bradesco
+        "BBAS3",           # Banco do Brasil
+        "SANB11", "SANB3", "SANB4",  # Santander
+        "BPAC11", "BPAC3", "BPAC5",  # BTG Pactual
+        "BBSE3",           # BB Seguridade (holding bancária)
+        "BRSR6", "BRSR3",  # Banrisul
+        "ABCB4",           # ABC Brasil
+        "BMGB4",           # BMG
+        "BIDI11", "BIDI4", # Inter (banco digital)
+        "BPAN4",           # Banco Pan
+        "PINE4",           # Pine
+        "CIEL3",           # Cielo (adquirente, usa métricas bancárias)
+    }
+
     # Mapeamento de tickers para nome da empresa na CVM
     # A CVM usa DENOM_CIA (nome completo), não ticker de pregão
     TICKER_TO_COMPANY = {
@@ -236,13 +254,17 @@ class TitanRouter:
             if response.status_code != 200:
                 return self._cvm_fallback(ticker_clean, f"ZIP não disponível: HTTP {response.status_code}")
 
-            # 3. Extrai dados estruturados do ZIP
-            xbrl_data = self._extract_cvm_data(response.content, company_name, year)
+            # 3. Detecta se é banco/IF para usar mapeamento correto
+            is_banking = ticker_clean in self.BANKING_TICKERS
+
+            # 4. Extrai dados estruturados do ZIP
+            xbrl_data = self._extract_cvm_data(response.content, company_name, year, is_banking=is_banking)
 
             if xbrl_data:
                 metadata = xbrl_data.pop("_metadata", {})
                 fiscal_months = metadata.get("fiscal_months", 12)
                 is_ytd = metadata.get("is_ytd", False)
+                detected_sector = metadata.get("sector", "Corporate")
 
                 # Form type mais descritivo
                 if fiscal_months == 3:
@@ -260,6 +282,7 @@ class TitanRouter:
                     document_type="XBRL",  # Mesmo tipo que SEC para reusar o fluxo
                     metadata={
                         "source": "CVM Dados Abertos",
+                        "sector": detected_sector,  # Banking ou Corporate
                         "form_type": form_type_desc,
                         "filing_date": metadata.get("period"),
                         "ticker": ticker_clean,
@@ -309,19 +332,28 @@ class TitanRouter:
         except Exception:
             return None
 
-    def _extract_cvm_data(self, zip_content: bytes, company_name: str, year: int) -> dict | None:
+    def _extract_cvm_data(self, zip_content: bytes, company_name: str, year: int, is_banking: bool = False) -> dict | None:
         """
         Extrai dados financeiros estruturados do ZIP da CVM.
 
-        Mapeia os códigos de conta CVM para nosso schema padronizado:
+        Para empresas CORPORATIVAS (is_banking=False):
         - 1 = Ativo Total
         - 1.01 = Ativo Circulante
         - 2.01 = Passivo Circulante
         - 2.02 = Passivo Não Circulante
         - 2.03 = Patrimônio Líquido
         - 3.01 = Receita
-        - 3.05 = EBIT (Resultado Antes do Resultado Financeiro)
+        - 3.05 = EBIT
         - 3.09 = Lucro Líquido
+
+        Para BANCOS/IFs (is_banking=True):
+        Estrutura diferente - bancos não têm "circulante/não-circulante" tradicional
+        - 1 = Ativo Total
+        - 2 = Passivo Total
+        - 2.03 ou 2.07 = Patrimônio Líquido
+        - 3.01 = Receitas da Intermediação Financeira
+        - 3.11 = Lucro Líquido
+        Obs: Bancos usam métricas específicas (ROE bancário, Basileia, etc.)
         """
         import io
         import zipfile
@@ -376,33 +408,142 @@ class TitanRouter:
                 # Mapeamento de contas CVM para nosso schema
                 extracted = {}
 
-                # BALANÇO PATRIMONIAL (BPA/BPP)
-                extracted["total_assets"] = bpa.get((latest, '1'), 0) * ESCALA
-                extracted["current_assets"] = bpa.get((latest, '1.01'), 0) * ESCALA
-                extracted["current_liabilities"] = bpp.get((latest, '2.01'), 0) * ESCALA
-                extracted["equity"] = bpp.get((latest, '2.03'), 0) * ESCALA
+                if is_banking:
+                    # =========================================================
+                    # EXTRAÇÃO PARA BANCOS / INSTITUIÇÕES FINANCEIRAS
+                    # =========================================================
+                    # Bancos IFRS usam estrutura diferente:
+                    # - 2.08 = Patrimônio Líquido (não 2.03!)
+                    # - 2.03 = Passivos Financeiros ao Custo Amortizado
+                    # - Não têm circulante/não-circulante tradicional
+                    
+                    extracted["total_assets"] = bpa.get((latest, '1'), 0) * ESCALA
+                    
+                    # PL de bancos IFRS: está em 2.08 (não 2.03!)
+                    # 2.03 em bancos IFRS = "Passivos Financeiros ao Custo Amortizado"
+                    equity = bpp.get((latest, '2.08'), 0)
+                    if equity == 0:
+                        # Fallback para estrutura não-IFRS
+                        equity = bpp.get((latest, '2.07'), 0)
+                    if equity == 0:
+                        # Último recurso
+                        equity = bpp.get((latest, '2.03'), 0)
+                    extracted["equity"] = equity * ESCALA
+                    
+                    # Passivo Total = Total do Passivo (2) menos PL
+                    total_passivo_e_pl = bpp.get((latest, '2'), 0) * ESCALA
+                    extracted["total_liabilities"] = total_passivo_e_pl - extracted["equity"]
+                    
+                    # Bancos IFRS não têm circulante tradicional
+                    # Usamos proxies ou deixamos nulo para evitar alertas falsos
+                    extracted["current_assets"] = None  # Não aplicável a bancos
+                    extracted["current_liabilities"] = None  # Não aplicável a bancos
+                    
+                    # Caixa: Disponibilidades (1.01.01) ou similar
+                    cash = bpa.get((latest, '1.01.01'), 0)
+                    if cash == 0:
+                        cash = bpa.get((latest, '1.01.01.01'), 0)
+                    if cash == 0:
+                        # Para bancos IFRS, tentar 1.01 (Caixa e Saldos em Bancos Centrais)
+                        cash = bpa.get((latest, '1.01'), 0)
+                    extracted["cash"] = cash * ESCALA
+                    
+                    # DRE Bancária IFRS
+                    # 3.01 = Receita de Juros (ou Margem Financeira)
+                    extracted["revenue"] = dre.get((latest, '3.01'), 0) * ESCALA
+                    
+                    # EBIT para bancos = Resultado antes de IR
+                    ebit = dre.get((latest, '3.05'), 0)
+                    if ebit == 0:
+                        ebit = dre.get((latest, '3.07'), 0)
+                    extracted["ebit"] = ebit * ESCALA
+                    
+                    # Lucro Líquido
+                    net_income = dre.get((latest, '3.11'), 0)
+                    if net_income == 0:
+                        net_income = dre.get((latest, '3.09'), 0)
+                    extracted["net_income"] = net_income * ESCALA
+                    
+                    # Lucros Acumulados - buscar nas subcontas do PL (2.08.x)
+                    retained = bpp.get((latest, '2.08.05'), 0) + bpp.get((latest, '2.08.04'), 0)
+                    if retained == 0:
+                        retained = bpp.get((latest, '2.08.03'), 0)  # Reservas
+                    if retained == 0:
+                        # Fallback para estrutura tradicional
+                        retained = bpp.get((latest, '2.03.05'), 0) + bpp.get((latest, '2.03.04'), 0)
+                    extracted["retained_earnings"] = retained * ESCALA
+                    
+                    # Dívida de Longo Prazo (não se aplica da mesma forma a bancos)
+                    extracted["long_term_debt"] = 0
+                    
+                    # Gross profit para bancos = Resultado Bruto da Intermediação
+                    extracted["gross_profit"] = dre.get((latest, '3.03'), 0) * ESCALA
+                    
+                    # Depósitos (importante para bancos)
+                    deposits = bpp.get((latest, '2.01.02'), 0)  # Depósitos
+                    extracted["deposits"] = deposits * ESCALA
+                    
+                    # =========================================================
+                    # MÉTRICAS DE CRÉDITO (PDD / Inadimplência)
+                    # =========================================================
+                    # Carteira de Crédito (1.02.03.05 = Operações de Crédito)
+                    loan_portfolio = bpa.get((latest, '1.02.03.05'), 0) * ESCALA
+                    if loan_portfolio == 0:
+                        # Fallback: tentar 1.02.01.01 ou somar operações de crédito
+                        loan_portfolio = bpa.get((latest, '1.02.01.01'), 0) * ESCALA
+                    extracted["loan_portfolio"] = loan_portfolio
+                    
+                    # PDD - Provisão para Perda Esperada (1.02.03.07) - valor negativo no balanço
+                    pdd_balance = abs(bpa.get((latest, '1.02.03.07'), 0)) * ESCALA
+                    
+                    # PDD na DRE (3.02.02) - Despesa de provisão do período
+                    pdd_expense = abs(dre.get((latest, '3.02.02'), 0)) * ESCALA
+                    
+                    # Calcular NPL (Non-Performing Loans) como proxy
+                    # NPL = PDD Acumulada / Carteira de Crédito
+                    # Isso é uma aproximação - quanto maior a provisão, maior a inadimplência esperada
+                    if loan_portfolio > 0 and pdd_balance > 0:
+                        npl_proxy = pdd_balance / loan_portfolio
+                        extracted["non_performing_loans"] = npl_proxy
+                    else:
+                        extracted["non_performing_loans"] = None
+                    
+                    # Guardar PDD para contexto
+                    extracted["pdd_balance"] = pdd_balance
+                    extracted["pdd_expense"] = pdd_expense
+                    
+                else:
+                    # =========================================================
+                    # EXTRAÇÃO PARA EMPRESAS CORPORATIVAS (não-financeiras)
+                    # =========================================================
+                    
+                    # BALANÇO PATRIMONIAL (BPA/BPP)
+                    extracted["total_assets"] = bpa.get((latest, '1'), 0) * ESCALA
+                    extracted["current_assets"] = bpa.get((latest, '1.01'), 0) * ESCALA
+                    extracted["current_liabilities"] = bpp.get((latest, '2.01'), 0) * ESCALA
+                    extracted["equity"] = bpp.get((latest, '2.03'), 0) * ESCALA
 
-                # Passivo não circulante
-                non_current_liab = bpp.get((latest, '2.02'), 0) * ESCALA
-                extracted["total_liabilities"] = extracted["current_liabilities"] + non_current_liab
+                    # Passivo não circulante
+                    non_current_liab = bpp.get((latest, '2.02'), 0) * ESCALA
+                    extracted["total_liabilities"] = extracted["current_liabilities"] + non_current_liab
 
-                # Lucros Acumulados (2.03.04 = Reservas de Lucros + 2.03.05 = Lucros/Prejuízos Acumulados)
-                retained_earnings = bpp.get((latest, '2.03.04'), 0) + bpp.get((latest, '2.03.05'), 0)
-                extracted["retained_earnings"] = retained_earnings * ESCALA
+                    # Lucros Acumulados (2.03.04 = Reservas de Lucros + 2.03.05 = Lucros/Prejuízos Acumulados)
+                    retained_earnings = bpp.get((latest, '2.03.04'), 0) + bpp.get((latest, '2.03.05'), 0)
+                    extracted["retained_earnings"] = retained_earnings * ESCALA
 
-                # Caixa (1.01.01 = Caixa e Equivalentes)
-                extracted["cash"] = bpa.get((latest, '1.01.01'), 0) * ESCALA
+                    # Caixa (1.01.01 = Caixa e Equivalentes)
+                    extracted["cash"] = bpa.get((latest, '1.01.01'), 0) * ESCALA
 
-                # Dívida de Longo Prazo (2.02.01 = Empréstimos e Financiamentos LP)
-                extracted["long_term_debt"] = bpp.get((latest, '2.02.01'), 0) * ESCALA
+                    # Dívida de Longo Prazo (2.02.01 = Empréstimos e Financiamentos LP)
+                    extracted["long_term_debt"] = bpp.get((latest, '2.02.01'), 0) * ESCALA
 
-                # DRE (valores YTD - já vem acumulado no ITR)
-                extracted["revenue"] = dre.get((latest, '3.01'), 0) * ESCALA
-                extracted["ebit"] = dre.get((latest, '3.05'), 0) * ESCALA
-                extracted["net_income"] = dre.get((latest, '3.09'), 0) * ESCALA
+                    # DRE (valores YTD - já vem acumulado no ITR)
+                    extracted["revenue"] = dre.get((latest, '3.01'), 0) * ESCALA
+                    extracted["ebit"] = dre.get((latest, '3.05'), 0) * ESCALA
+                    extracted["net_income"] = dre.get((latest, '3.09'), 0) * ESCALA
 
-                # Lucro Bruto (para margem bruta real)
-                extracted["gross_profit"] = dre.get((latest, '3.03'), 0) * ESCALA
+                    # Lucro Bruto (para margem bruta real)
+                    extracted["gross_profit"] = dre.get((latest, '3.03'), 0) * ESCALA
 
                 # Verifica dados mínimos
                 if not extracted.get("total_assets") or not extracted.get("equity"):
@@ -421,6 +562,7 @@ class TitanRouter:
                     "company": company_name,
                     "extraction_method": "Structured CSV from ZIP",
                     "scale": "Values in BRL",
+                    "sector": "Banking" if is_banking else "Corporate",  # IMPORTANTE!
                     "fiscal_months": fiscal_months,  # Quantos meses o YTD cobre
                     "is_ytd": fiscal_months < 12  # True se não é ano completo
                 }

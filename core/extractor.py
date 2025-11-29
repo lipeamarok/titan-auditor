@@ -53,6 +53,8 @@ class FinancialStatement(BaseModel):
     non_performing_loans: Optional[float] = Field(None, description="Índice de Inadimplência/NPL (Bancos)")
     deposits: Optional[float] = Field(None, description="Total de Depósitos (Bancos)")
     loan_portfolio: Optional[float] = Field(None, description="Carteira de Crédito (Bancos)")
+    pdd_balance: Optional[float] = Field(None, description="PDD - Provisão para Devedores Duvidosos (saldo)")
+    pdd_expense: Optional[float] = Field(None, description="PDD - Despesa de provisão no período")
 
     # --- CAMPOS INSURANCE (null para outros setores) ---
     loss_ratio: Optional[float] = Field(None, description="Sinistralidade (Seguros) - ex: 0.72 para 72%")

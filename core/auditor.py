@@ -102,7 +102,36 @@ class TitanAuditor:
                 raise ValueError("Resposta vazia da IA.")
 
             # Parsing e Validação Pydantic
-            data_dict = json.loads(content)
+            try:
+                data_dict = json.loads(content)
+            except json.JSONDecodeError as e:
+                # Tentar limpar o JSON (remover caracteres problemáticos)
+                logger.warning(f"JSON malformado, tentando recuperar: {e}")
+                
+                # Tentar extrair JSON válido do conteúdo
+                import re
+                json_match = re.search(r'\{[\s\S]*\}', content)
+                if json_match:
+                    try:
+                        # Limpar quebras de linha dentro de strings
+                        cleaned = json_match.group(0)
+                        cleaned = re.sub(r'(?<!\\)\n', ' ', cleaned)
+                        data_dict = json.loads(cleaned)
+                    except json.JSONDecodeError:
+                        # Último recurso: retornar relatório de fallback
+                        logger.error("Não foi possível recuperar JSON. Usando fallback.")
+                        data_dict = {
+                            "verdict": "HOLD",
+                            "headline": "Análise Inconclusiva - Erro de Processamento",
+                            "executive_summary": "Não foi possível gerar análise completa devido a erro de processamento. Recomenda-se nova tentativa ou análise manual dos dados financeiros apresentados.",
+                            "management_trust_score": 50,
+                            "bull_case": ["Dados financeiros disponíveis para análise manual"],
+                            "bear_case": ["Análise automatizada incompleta"],
+                            "math_explanation": "Erro no processamento da resposta da IA. Os cálculos matemáticos estão corretos, mas a análise qualitativa não pôde ser gerada."
+                        }
+                else:
+                    raise
+            
             report = FinalAuditReport(**data_dict)
 
             logger.info("Auditoria final concluída com sucesso.")
@@ -110,7 +139,6 @@ class TitanAuditor:
 
         except json.JSONDecodeError:
             logger.error("Erro ao decodificar JSON do Auditor.")
-            # Fallback de emergência poderia ser implementado aqui
             raise
         except Exception as e:
             logger.critical(f"Erro crítico no Auditor: {e}")
