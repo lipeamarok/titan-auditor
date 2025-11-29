@@ -171,7 +171,7 @@ class TitanMathEngine:
         # 3. ROE Bancário (> 15% é bom para bancos)
         # NOTA: Se dados são YTD (ex: 9 meses), o ROE precisa ser anualizado
         roe = self.safe_div(data.net_income, data.equity)
-        
+
         # Detectar se é YTD pelo período (ex: "2025-09-30" = 9 meses)
         annualization_factor = 1.0
         if data.period and len(data.period) >= 10:
@@ -181,9 +181,9 @@ class TitanMathEngine:
                     annualization_factor = 12 / month
             except (ValueError, IndexError):
                 pass
-        
+
         roe_annualized = roe * annualization_factor
-        
+
         if roe_annualized >= 0.15:
             score += 1.0
         elif roe_annualized >= 0.10:

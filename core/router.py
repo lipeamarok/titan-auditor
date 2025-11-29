@@ -289,6 +289,7 @@ class TitanRouter:
                         "company": company_name,
                         "fiscal_months": fiscal_months,
                         "is_ytd": is_ytd,
+                        "document_url": zip_url,  # URL do arquivo ZIP para referência
                         "xbrl_data": xbrl_data  # Dados financeiros já extraídos!
                     }
                 )
@@ -416,9 +417,9 @@ class TitanRouter:
                     # - 2.08 = Patrimônio Líquido (não 2.03!)
                     # - 2.03 = Passivos Financeiros ao Custo Amortizado
                     # - Não têm circulante/não-circulante tradicional
-                    
+
                     extracted["total_assets"] = bpa.get((latest, '1'), 0) * ESCALA
-                    
+
                     # PL de bancos IFRS: está em 2.08 (não 2.03!)
                     # 2.03 em bancos IFRS = "Passivos Financeiros ao Custo Amortizado"
                     equity = bpp.get((latest, '2.08'), 0)
@@ -429,16 +430,16 @@ class TitanRouter:
                         # Último recurso
                         equity = bpp.get((latest, '2.03'), 0)
                     extracted["equity"] = equity * ESCALA
-                    
+
                     # Passivo Total = Total do Passivo (2) menos PL
                     total_passivo_e_pl = bpp.get((latest, '2'), 0) * ESCALA
                     extracted["total_liabilities"] = total_passivo_e_pl - extracted["equity"]
-                    
+
                     # Bancos IFRS não têm circulante tradicional
                     # Usamos proxies ou deixamos nulo para evitar alertas falsos
                     extracted["current_assets"] = None  # Não aplicável a bancos
                     extracted["current_liabilities"] = None  # Não aplicável a bancos
-                    
+
                     # Caixa: Disponibilidades (1.01.01) ou similar
                     cash = bpa.get((latest, '1.01.01'), 0)
                     if cash == 0:
@@ -447,23 +448,23 @@ class TitanRouter:
                         # Para bancos IFRS, tentar 1.01 (Caixa e Saldos em Bancos Centrais)
                         cash = bpa.get((latest, '1.01'), 0)
                     extracted["cash"] = cash * ESCALA
-                    
+
                     # DRE Bancária IFRS
                     # 3.01 = Receita de Juros (ou Margem Financeira)
                     extracted["revenue"] = dre.get((latest, '3.01'), 0) * ESCALA
-                    
+
                     # EBIT para bancos = Resultado antes de IR
                     ebit = dre.get((latest, '3.05'), 0)
                     if ebit == 0:
                         ebit = dre.get((latest, '3.07'), 0)
                     extracted["ebit"] = ebit * ESCALA
-                    
+
                     # Lucro Líquido
                     net_income = dre.get((latest, '3.11'), 0)
                     if net_income == 0:
                         net_income = dre.get((latest, '3.09'), 0)
                     extracted["net_income"] = net_income * ESCALA
-                    
+
                     # Lucros Acumulados - buscar nas subcontas do PL (2.08.x)
                     retained = bpp.get((latest, '2.08.05'), 0) + bpp.get((latest, '2.08.04'), 0)
                     if retained == 0:
@@ -472,17 +473,17 @@ class TitanRouter:
                         # Fallback para estrutura tradicional
                         retained = bpp.get((latest, '2.03.05'), 0) + bpp.get((latest, '2.03.04'), 0)
                     extracted["retained_earnings"] = retained * ESCALA
-                    
+
                     # Dívida de Longo Prazo (não se aplica da mesma forma a bancos)
                     extracted["long_term_debt"] = 0
-                    
+
                     # Gross profit para bancos = Resultado Bruto da Intermediação
                     extracted["gross_profit"] = dre.get((latest, '3.03'), 0) * ESCALA
-                    
+
                     # Depósitos (importante para bancos)
                     deposits = bpp.get((latest, '2.01.02'), 0)  # Depósitos
                     extracted["deposits"] = deposits * ESCALA
-                    
+
                     # =========================================================
                     # MÉTRICAS DE CRÉDITO (PDD / Inadimplência)
                     # =========================================================
@@ -492,13 +493,13 @@ class TitanRouter:
                         # Fallback: tentar 1.02.01.01 ou somar operações de crédito
                         loan_portfolio = bpa.get((latest, '1.02.01.01'), 0) * ESCALA
                     extracted["loan_portfolio"] = loan_portfolio
-                    
+
                     # PDD - Provisão para Perda Esperada (1.02.03.07) - valor negativo no balanço
                     pdd_balance = abs(bpa.get((latest, '1.02.03.07'), 0)) * ESCALA
-                    
+
                     # PDD na DRE (3.02.02) - Despesa de provisão do período
                     pdd_expense = abs(dre.get((latest, '3.02.02'), 0)) * ESCALA
-                    
+
                     # Calcular NPL (Non-Performing Loans) como proxy
                     # NPL = PDD Acumulada / Carteira de Crédito
                     # Isso é uma aproximação - quanto maior a provisão, maior a inadimplência esperada
@@ -507,16 +508,16 @@ class TitanRouter:
                         extracted["non_performing_loans"] = npl_proxy
                     else:
                         extracted["non_performing_loans"] = None
-                    
+
                     # Guardar PDD para contexto
                     extracted["pdd_balance"] = pdd_balance
                     extracted["pdd_expense"] = pdd_expense
-                    
+
                 else:
                     # =========================================================
                     # EXTRAÇÃO PARA EMPRESAS CORPORATIVAS (não-financeiras)
                     # =========================================================
-                    
+
                     # BALANÇO PATRIMONIAL (BPA/BPP)
                     extracted["total_assets"] = bpa.get((latest, '1'), 0) * ESCALA
                     extracted["current_assets"] = bpa.get((latest, '1.01'), 0) * ESCALA

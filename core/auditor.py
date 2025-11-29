@@ -107,7 +107,7 @@ class TitanAuditor:
             except json.JSONDecodeError as e:
                 # Tentar limpar o JSON (remover caracteres problemáticos)
                 logger.warning(f"JSON malformado, tentando recuperar: {e}")
-                
+
                 # Tentar extrair JSON válido do conteúdo
                 import re
                 json_match = re.search(r'\{[\s\S]*\}', content)
@@ -131,7 +131,7 @@ class TitanAuditor:
                         }
                 else:
                     raise
-            
+
             report = FinalAuditReport(**data_dict)
 
             logger.info("Auditoria final concluída com sucesso.")

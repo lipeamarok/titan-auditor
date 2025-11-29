@@ -277,6 +277,47 @@ def render_titan_dashboard(financials, math_report, audit_report):
         headline=clean_text(audit_report.headline),
         summary=clean_text(audit_report.executive_summary)
     )
+    
+    # Botão de copiar análise
+    copy_text = f"""# Análise Titan: {financials.company_name}
+**Período:** {financials.period}
+**Setor:** {sector}
+**Veredicto:** {verdict_text}
+**Confiança na Gestão:** {audit_report.management_trust_score}/100
+
+## {audit_report.headline}
+
+{audit_report.executive_summary}
+
+### Tese Bull (Otimista)
+{chr(10).join(['- ' + item for item in audit_report.bull_case])}
+
+### Tese Bear (Pessimista)
+{chr(10).join(['- ' + item for item in audit_report.bear_case])}
+
+### Análise Quantitativa
+{audit_report.math_explanation}
+
+---
+*Gerado por Titan Auditor em {financials.period}*
+"""
+    
+    # Opções de exportar análise
+    with st.expander("📋 Exportar Análise", expanded=False):
+        tab_copy, tab_download = st.tabs(["Copiar Texto", "Download MD"])
+        
+        with tab_copy:
+            st.caption("Selecione e copie (Ctrl+C):")
+            st.code(copy_text, language="markdown")
+        
+        with tab_download:
+            st.download_button(
+                label="⬇️ Baixar arquivo .md",
+                data=copy_text,
+                file_name=f"titan_{financials.company_name}_{financials.period}.md",
+                mime="text/markdown",
+                help="Baixar análise como arquivo Markdown"
+            )
 
     # =========================================================================
     # NIVEIS 2, 3, 4: ABAS (Progressive Disclosure)
@@ -297,13 +338,13 @@ def render_titan_dashboard(financials, math_report, audit_report):
         # === DASHBOARD BANKING ===
         if sector == "Banking":
             m1, m2, m3, m4 = st.columns(4)
-            
+
             # Card 1: Solidez (Capital/Ativos ou Basileia)
             with m1:
                 basel = getattr(financials, 'basel_ratio', None)
                 if basel is None:
                     basel = math_report.dupont_analysis.get('capital_ratio', 0)
-                
+
                 # Para bancos: 8%+ é bom, 5-8% é ok, <5% é ruim
                 if basel and basel >= 0.08:
                     delta_text = "Sólido"
@@ -314,7 +355,7 @@ def render_titan_dashboard(financials, math_report, audit_report):
                 else:
                     delta_text = "Frágil"
                     delta_type = "negative"
-                
+
                 metric_card(
                     label=FRIENDLY_LABELS['basel'],
                     value=f"{basel*100:.1f}%" if basel else "N/A",
@@ -323,7 +364,7 @@ def render_titan_dashboard(financials, math_report, audit_report):
                     icon_name="bank",
                     tooltip="Capital próprio / Ativos totais. Bancos operam com 5-10% tipicamente. >8% é sólido."
                 )
-            
+
             # Card 2: Cobertura de Crédito (PDD/Carteira)
             # NOTA: Isso é COBERTURA de provisão, não inadimplência real
             # 4-6% é normal para bancos brasileiros
@@ -331,7 +372,7 @@ def render_titan_dashboard(financials, math_report, audit_report):
                 npl = getattr(financials, 'non_performing_loans', None)
                 pdd = getattr(financials, 'pdd_balance', None) or 0
                 carteira = getattr(financials, 'loan_portfolio', None) or 0
-                
+
                 if npl is not None and npl > 0:
                     # PDD/Carteira - indica cobertura de provisão
                     if npl <= 0.03:
@@ -356,7 +397,7 @@ def render_titan_dashboard(financials, math_report, audit_report):
                     delta_type = "neutral"
                     value_text = "N/A"
                     tooltip_text = "Dados de PDD/Carteira de Crédito não disponíveis neste relatório."
-                
+
                 metric_card(
                     label="PDD/Carteira",
                     value=value_text,
@@ -365,12 +406,12 @@ def render_titan_dashboard(financials, math_report, audit_report):
                     icon_name="shield",  # Ícone de proteção, não alerta
                     tooltip=tooltip_text
                 )
-            
+
             # Card 3: Rentabilidade (ROE anualizado)
             with m3:
                 roe_raw = math_report.dupont_analysis['roe']
                 roe_display = annualize_roe(roe_raw, financials.period)
-                
+
                 # Para bancos: >15% é ótimo, 10-15% é bom, <10% é fraco
                 if roe_display >= 15:
                     delta_text = "Excelente"
@@ -384,10 +425,10 @@ def render_titan_dashboard(financials, math_report, audit_report):
                 else:
                     delta_text = "Fraco"
                     delta_type = "negative"
-                
+
                 # Indica se foi anualizado
                 is_annualized = roe_display != roe_raw
-                
+
                 metric_card(
                     label=FRIENDLY_LABELS['roe'],
                     value=f"{roe_display:.1f}%",
@@ -396,11 +437,11 @@ def render_titan_dashboard(financials, math_report, audit_report):
                     icon_name="trending_up",
                     tooltip=f"Retorno sobre Patrimônio Líquido. Mede lucro gerado sobre capital dos acionistas. Bancos bons: >15%."
                 )
-            
+
             # Card 4: Alavancagem
             with m4:
                 leverage = math_report.dupont_analysis['financial_leverage']
-                
+
                 # Para bancos: 8-15x é normal, >15x é alto, <8x é conservador
                 if leverage <= 10:
                     delta_text = "Conservador"
@@ -411,7 +452,7 @@ def render_titan_dashboard(financials, math_report, audit_report):
                 else:
                     delta_text = "Elevada"
                     delta_type = "negative"
-                
+
                 metric_card(
                     label=FRIENDLY_LABELS['leverage'],
                     value=f"{leverage:.1f}x",
@@ -732,7 +773,7 @@ def render_titan_dashboard(financials, math_report, audit_report):
                 st.write(f"- Margem Líquida: `{dupont.get('net_margin', 'N/A')}%`")
                 st.write(f"- Giro do Ativo: `{dupont.get('asset_turnover', 'N/A')}`")
                 st.write(f"- Alavancagem: `{dupont.get('financial_leverage', 'N/A')}x`")
-                
+
                 # ROE com anualização se dados YTD
                 roe_raw = dupont.get('roe', 0)
                 roe_annualized = annualize_roe(roe_raw, financials.period)
@@ -892,12 +933,14 @@ def main():
                     metric_card("Valor de Mercado", format_currency(market_info['market_cap'], currency), delta_type="neutral")
                 with col3:
                     dy = market_info['dividend_yield']
-                    val_dy = f"{dy*100:.2f}%" if dy else "0%"
-                    metric_card("Dividend Yield", val_dy, "Prov. 12m", delta_type="positive")
+                    val_dy = f"{dy*100:.2f}%" if dy and dy > 0 else "N/A"
+                    metric_card("Div. Yield", val_dy, "Yahoo Finance", delta_type="neutral",
+                               tooltip="Via Yahoo Finance. Pode não incluir todos os proventos.")
                 with col4:
-                    # Para FIIs/ETFs, P/VP é mais relevante que P/L, mas vamos manter simples por enquanto ou mostrar Volume
                     vol = market_info.get('volume', 0)
                     metric_card("Volume", format_currency(vol, currency), delta_type="neutral")
+                
+                st.caption("ℹ️ *Dados de mercado via Yahoo Finance.*")
 
                 st.markdown("### Histórico de Cotação (1 Ano)")
                 hist_data = MarketDataService.get_price_history(search_data['ticker'], region=search_data['region'])
@@ -1043,11 +1086,16 @@ def main():
                     with col3:
                         pe = market_info['pe_ratio']
                         pe_val = f"{pe:.2f}x" if pe and pe > 0 else "N/A"
-                        metric_card("P/L (Preço/Lucro)", pe_val, "Anos p/ retorno", delta_type="neutral")
+                        metric_card("P/L", pe_val, "Yahoo Finance", delta_type="neutral", 
+                                   tooltip="Preço/Lucro via Yahoo Finance. Pode divergir de outras fontes.")
                     with col4:
                         dy = market_info['dividend_yield']
-                        val_dy = f"{dy*100:.2f}%" if dy else "0%"
-                        metric_card("Dividend Yield", val_dy, "Prov. 12m", delta_type="positive")
+                        val_dy = f"{dy*100:.2f}%" if dy and dy > 0 else "N/A"
+                        metric_card("Div. Yield", val_dy, "Yahoo Finance", delta_type="neutral",
+                                   tooltip="Dividend Yield via Yahoo Finance. Pode não incluir todos os proventos (JCP, extras).")
+                
+                # Nota sobre fonte de dados
+                st.caption("ℹ️ *Dados de mercado via Yahoo Finance. Para valores precisos de proventos, consulte B3 ou Status Invest.*")
 
                 # Gráfico de Preço (Linha Simples e Elegante)
                 st.markdown("### Histórico de Cotação (1 Ano)")
@@ -1136,13 +1184,27 @@ def main():
                             form_type = metadata.get("form_type", "10-Q")
                             filing_date = metadata.get("filing_date", "")
                             source = metadata.get("source", "SEC XBRL")
-
-                            # Mensagem diferente para BR vs US
+                            document_url = metadata.get("document_url", "")
+                            
+                            # Mensagem com link para documento específico
                             if "CVM" in source:
-                                st.success(f"Dados financeiros obtidos via CVM Dados Abertos ({form_type} - {filing_date})")
+                                # Para CVM, o document_url deveria ter o arquivo ZIP específico
+                                if document_url:
+                                    period_link = f"[{form_type} - {filing_date}]({document_url})"
+                                else:
+                                    # Fallback para portal genérico
+                                    cvm_url = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/"
+                                    period_link = f"[{form_type} - {filing_date}]({cvm_url})"
+                                st.success(f"✅ Dados obtidos via CVM Dados Abertos: {period_link}")
                                 button_label = "Auditar com Dados Oficiais CVM"
                             else:
-                                st.success(f"Dados financeiros obtidos via SEC XBRL API ({form_type} - {filing_date})")
+                                # Para SEC, montar link específico do filing
+                                if document_url:
+                                    period_link = f"[{form_type} - {filing_date}]({document_url})"
+                                else:
+                                    sec_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={search_data['ticker']}&type={form_type}&dateb=&owner=include&count=10"
+                                    period_link = f"[{form_type} - {filing_date}]({sec_url})"
+                                st.success(f"✅ Dados obtidos via SEC EDGAR: {period_link}")
                                 button_label = "Auditar com Dados Oficiais SEC"
 
                             # Mostra preview dos dados extraídos

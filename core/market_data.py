@@ -55,6 +55,23 @@ class MarketDataService:
                 industry = info.get('industry', 'Fund/Other')
                 currency = info.get('currency', 'BRL')
 
+            # Dividend Yield - usar trailingAnnualDividendYield (mais preciso)
+            # Yahoo tem vários campos de DY com valores inconsistentes:
+            # - dividendYield: às vezes em %, às vezes em decimal, frequentemente errado
+            # - trailingAnnualDividendYield: em decimal, mais consistente
+            # - dividendRate / price: cálculo manual como fallback
+            trailing_dy = info.get('trailingAnnualDividendYield', 0.0) or 0.0
+            
+            if trailing_dy > 0:
+                dividend_yield = trailing_dy  # Já em decimal (ex: 0.04 = 4%)
+            else:
+                # Fallback: calcular manualmente
+                div_rate = info.get('dividendRate', 0.0) or 0.0
+                if div_rate > 0 and price > 0:
+                    dividend_yield = div_rate / price
+                else:
+                    dividend_yield = 0.0
+
             return {
                 "name": info.get('longName', info.get('shortName', search_ticker)), # Fallback para shortName
                 "sector": sector,
@@ -63,7 +80,7 @@ class MarketDataService:
                 "currency": currency,
                 "market_cap": info.get('marketCap', 0),
                 "pe_ratio": info.get('trailingPE', 0.0),
-                "dividend_yield": info.get('dividendYield', 0.0),
+                "dividend_yield": dividend_yield,
                 "volume": info.get('volume', info.get('regularMarketVolume', 0)), # Volume 24h
                 "high_24h": info.get('dayHigh', info.get('regularMarketDayHigh', 0.0)),
                 "low_24h": info.get('dayLow', info.get('regularMarketDayLow', 0.0)),
