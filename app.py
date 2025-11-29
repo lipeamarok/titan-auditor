@@ -134,13 +134,23 @@ def extract_text_from_pdf(file_input) -> str:
         return ""
 
 def get_api_credentials(provider_key: str):
-    """Recupera credenciais seguras para instanciar os agentes."""
+    """Recupera credenciais seguras para instanciar os agentes.
+    Suporta tanto .env (local) quanto st.secrets (Streamlit Cloud).
+    """
     config = LLM_PROVIDERS.get(provider_key)
     if not config: return None, None, None
 
-    key = os.getenv(config["api_key_env"])
+    env_var = config["api_key_env"]
+    
+    # Tenta st.secrets primeiro (Streamlit Cloud), depois os.getenv (.env local)
+    key = None
+    if hasattr(st, 'secrets') and env_var in st.secrets:
+        key = st.secrets[env_var]
+    else:
+        key = os.getenv(env_var)
+    
     if not key:
-        st.error(f"Chave {config['api_key_env']} não encontrada no .env")
+        st.error(f"Chave {env_var} não encontrada. Configure no .env (local) ou em Secrets (Streamlit Cloud).")
         st.stop()
 
     return key, config["base_url"], config["model"]
